@@ -4,18 +4,17 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import datasets
 import torchvision.transforms as transforms
 import torchvision.io as io
 from torch.utils.data import DataLoader, TensorDataset
-from matplotlib.pyplot import imshow
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 import random
 import os
 import sys
 
-#### MISC FUNCTIONS #####
+################## MISC FUNCTIONS ###################
 
 # split dataset into training validation and testing
 def getSplitData(data, test_size=0.2, test = True):
@@ -48,6 +47,7 @@ def makeDatasets(x_train, y_train, x_valid, y_valid,  x_test, y_test):
     test_dataset = TensorDataset(torch.from_numpy(x_test), torch.from_numpy(y_test))
     return train_dataset, val_dataset, test_dataset
 
+# make data loaders
 def make_DataLoaders(train_dataset, val_dataset, test_dataset, batch_size):
     train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size, shuffle=True)
@@ -69,29 +69,8 @@ def display_image(X_i, title):
     plt.title(title)
     plt.show()
 
-# convert directory of images into csv
-def JPGsToCSV(dir_path,csv_path):
-    # define the alphabet
-    alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+################## ANN MODEL ###################
 
-    # create columns list
-
-    # loop through every letter/class in alphabet
-    for class_num, letter in enumerate(alphabet):
-        # set the class directory path
-        class_dir_pth = dir_path + "/" + letter
-
-        # get all the jpg files in the class directory
-        files = os.listdir(class_dir_pth)
-        jpg_files = [file for file in files if file.lower().endswith('.jpg')]
-
-        for file in jpg_files:
-            print(file)
-
-
-        
-
-#### ANN MODEL ####
 class LetterClassifier(nn.Module):
     def __init__(self, input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28], output_size=10, activation=F.relu, dropout_rate = 0):
         super(LetterClassifier, self).__init__()
@@ -205,7 +184,7 @@ def load_model(file_path):
     model.load_state_dict(torch.load(file_path))
     return model
 
-## COMBINED LETTER CLASSIFIER ANNS ##
+############### COMBINED LETTER CLASSIFIER ANNS ###############
 class CombLetterClassifier:
     # initialize
     def __init__(self, num_models, device,input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28,28*28], output_size=26, activation=F.relu, dropout_rate = 0, create_models=True):
@@ -301,6 +280,31 @@ class CombLetterClassifier:
 
         return max[1] # return the predicted class
 
+    def validate(self, dir_path):
+        correct = 0
+        total = 0
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+        # loop through every letter/class in alphabet
+        for class_num, letter in enumerate(alphabet):
+            # set the class directory path
+            class_dir_pth = dir_path + "/" + letter
+
+            # get all the jpg files in the class directory
+            files = os.listdir(class_dir_pth)
+            jpg_files = [file for file in files if file.lower().endswith('.jpg')]
+
+            for file in jpg_files:
+                image = JPGtoTensor(class_dir_pth + "/" + file,device=self.device)
+                predicted = self.classify(image)
+                total += 1
+                if predicted == class_num:
+                    correct += 1
+
+        accuracy = 100 * correct / total
+
+        return accuracy
+
     # save all models to standard file location
     def save(self):
         for i in range(self.num_models):
@@ -319,7 +323,7 @@ class CombLetterClassifier:
 #### MAIN ####
 if __name__ == "__main__":
     # set constant training values
-    no_epochs = 6
+    no_epochs = 10
     min_loss_chng = 0.02
     learn_rate = 0.01
     batch_size = 32
@@ -356,6 +360,10 @@ if __name__ == "__main__":
         if save == "y":
             comb_classifier.save()
             print("Model saved successfully.")
+
+    # test final model on handcrafted test data
+    accuracy = comb_classifier.validate("data/hand_crafted")
+    print(accuracy)
 
     # get file path of digit to predict
     file_path = input("Please enter a filepath (\"q\" to quit): ")
