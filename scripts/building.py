@@ -4,23 +4,21 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import datasets
 import torchvision.transforms as transforms
 import torchvision.io as io
 from torch.utils.data import DataLoader, TensorDataset
-from matplotlib.pyplot import imshow
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 import random
 import os
 import sys
+import string
 
-#### MISC FUNCTIONS #####
+################## MISC FUNCTIONS ###################
 
-# load MNIST training and test data
-def getKaggleData(file_path, test_size=0.2, test = True):
-    # Read the data from the file path
-    data = pd.read_csv(file_path)
+# split dataset into training validation and testing
+def getSplitData(data, test_size=0.2, test = True):
 
     # Extract the image data into X and labels into y
     y = data['0']
@@ -43,12 +41,14 @@ def getKaggleData(file_path, test_size=0.2, test = True):
 
     return X_train, y_train, X_valid, y_valid, X_test, y_test
 
+# make datasets 
 def makeDatasets(x_train, y_train, x_valid, y_valid,  x_test, y_test):
     train_dataset = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
     val_dataset = TensorDataset(torch.from_numpy(x_valid), torch.from_numpy(y_valid))
     test_dataset = TensorDataset(torch.from_numpy(x_test), torch.from_numpy(y_test))
     return train_dataset, val_dataset, test_dataset
 
+# make data loaders
 def make_DataLoaders(train_dataset, val_dataset, test_dataset, batch_size):
     train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size, shuffle=True)
@@ -64,12 +64,13 @@ def JPGtoTensor(file_path,device):
     image = image.to(device)
     return image
 
+# display image
 def display_image(X_i, title):
     plt.imshow(X_i, cmap='binary')
     plt.title(title)
     plt.show()
 
-#### ANN MODEL ####
+################## ANN MODEL ###################
 
 class LetterClassifier(nn.Module):
     def __init__(self, input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28], output_size=10, activation=F.relu, dropout_rate = 0):
@@ -98,6 +99,7 @@ class LetterClassifier(nn.Module):
         feature = torch.softmax(self.output_layer(feature), dim=1)
         return feature
 
+# used to train a single letter classifier model
 def train_classifier(model,train_loader, val_loader,max_no_epochs, min_loss_chng,learn_rate, display=False, loss_func=nn.CrossEntropyLoss()):
     # initialize previous loss function and
     optimizer = torch.optim.SGD(model.parameters(),lr=learn_rate)
@@ -141,9 +143,12 @@ def train_classifier(model,train_loader, val_loader,max_no_epochs, min_loss_chng
                 no_min_change = 0
             if no_min_change > 4:
                 return validation_trend, training_trend, loss_trend, epochs
-            
+    
+    del optimizer
+    del loss_func
     return validation_trend, training_trend, loss_trend, epochs
 
+# used to classify a single letter classifier
 def validate_classifier(model, test_loader, max_batches = None):
     model.eval()  # set model to evaluation mode
     correct = 0
@@ -164,21 +169,11 @@ def validate_classifier(model, test_loader, max_batches = None):
 
     return accuracy
 
+# make prediction using LetterClassifier
 def makePrediction(model,image):
     output = model(torch.tensor(image).view(1, -1))
     _, predicted = torch.max(output, 1)
     return predicted
-
-def examplePredictions(model,no_examples):
-    model.eval()
-    with torch.no_grad():
-        for i in range(no_examples):
-            idx = random.randint(0, x_test.shape[0])
-            image = x_test[idx]
-            label = y_test[idx]
-            predicted = makePrediction(model,image)
-            print("True label: %d, Predicted label: %d" % (label, predicted))
-            display_image(image.reshape(28, 28), "True label: %d, Predicted label: %d" % (label, predicted))
 
 # save the current state of a model
 def save_model(model,file_path):
@@ -190,64 +185,232 @@ def load_model(file_path):
     model.load_state_dict(torch.load(file_path))
     return model
 
+############### COMBINED LETTER CLASSIFIER ANNS ###############
+class CombLetterClassifier:
+    # initialize
+    def __init__(self, num_models, device,input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28,28*28], output_size=26, activation=F.relu, dropout_rate = 0, create_models=True,model_targets = []):
+        # initlialize standard variables
+        self.num_models = num_models
+        self.models = []
+        self.device = device
+        self.model_targets = model_targets
+        self.output_size = output_size
+
+        # split output classes among models
+        if len(self.model_targets) == 0 or len(self.model_targets) != self.num_models:
+            print("Using default target split")
+            quotient, remainder = divmod(output_size, num_models)
+            self.output_sizes =  [quotient + 1] * remainder + [quotient] * (num_models - remainder)
+        else:
+            self.output_sizes = []
+            for i in range(len(model_targets)):
+                self.output_sizes.append(len(model_targets[i]))
+
+        # create the relevant number of models
+        if create_models:
+            i = 0
+            for o_s in self.output_sizes:
+                self.models.append(LetterClassifier(input_size=input_size, num_layers=num_layers, layer_sizes=layer_sizes, output_size=o_s, activation=activation, dropout_rate = dropout_rate))
+                self.models[i].to(self.device)
+                i=i+1
+
+    # create the data loders for each model
+    def createDataLoaders(self,data_file_path,batch_size):
+        # intialise dataloader arrays
+        self.train_loaders = []
+        self.test_loaders = []
+        self.val_loaders = []
+
+        # load the entire dataset
+        data = pd.read_csv(data_file_path)
+
+        start = 0
+        for i in range(self.num_models):   # for loop where each iteration creates new set of dataloaders per model
+            print("Making loaders for model ",i, "with num_classes = ",self.output_sizes[i])
+            print("start =",start)
+
+            # calculate class intervals
+            end = start + self.output_sizes[i]
+
+            # reduce dataset to specific classes
+            downsampled_data = []
+            if len(self.model_targets) == 0 or len(self.model_targets) != self.num_models:
+                for j in range(start,end):
+                    class_data = data[data.iloc[:, 0] == j]
+                    class_data[data.columns[0]] = class_data[data.columns[0]] - start
+                    downsampled_data.append(class_data)
+                downsampled_data = pd.concat(downsampled_data)
+            else:
+                for j in range(0,self.output_size):
+                    if j in self.model_targets[i]:
+                        class_data = data[data.iloc[:, 0] == j]
+                        class_data[data.columns[0]] = self.model_targets[i].index(j)
+                        downsampled_data.append(class_data)
+                downsampled_data = pd.concat(downsampled_data)
+
+            # split downsampled data into train val and test
+            X_train, y_train, X_valid, y_valid, X_test, y_test = getSplitData(downsampled_data, test_size=0.2, test = True)
+
+            # make datasets and move to device
+            train_dataset,val_dataset,test_dataset = makeDatasets(X_train,y_train,X_valid, y_valid, X_test,y_test)
+            train_dataset = [(x.to(self.device), y.to(self.device)) for x, y in train_dataset]
+            val_dataset = [(x.to(self.device), y.to(self.device)) for x, y in val_dataset]
+            test_dataset = [(x.to(self.device), y.to(self.device)) for x, y in test_dataset]
+            print(np.unique(y_train))
+
+            # make dataloaders and add to arrays
+            train_loader, val_loader, test_loader = make_DataLoaders(train_dataset,val_dataset,test_dataset,batch_size)
+            self.train_loaders.append(train_loader)
+            self.val_loaders.append(val_loader)
+            self.test_loaders.append(test_loader)
+
+            start = end
+
+    # train all the models on thier relevant training data
+    def train(self,max_no_epochs, min_loss_chng,learn_rate, display=False, loss_func=nn.CrossEntropyLoss()):
+        for i in range(self.num_models):
+            print("Training model:",i)
+            train_classifier(self.models[i],self.train_loaders[i],self.val_loaders[i],max_no_epochs,min_loss_chng,learn_rate,display=display,loss_func=loss_func)
+            print("Validating model:",i)
+            test_acc = validate_classifier(self.models[i],self.test_loaders[i])
+            print(f"Test Set Validation Accuracy: {test_acc:.2f}%")
+    
+    # classify single image
+    def classify(self,image):
+
+        # get the predictions from each model
+        max_preds = []
+        for i in range(self.num_models):
+            output = self.models[i](image.clone().detach().view(1, -1))
+            max_value, predicted = torch.max(output, 1) # find the maximum prediction
+            if len(self.model_targets) == 0:
+                max_preds.append([max_value.item(),predicted.item() + sum(self.output_sizes[:i])])  # add the maximum prediction and the corrected class
+            else:
+                max_preds.append([max_value.item(),self.model_targets[i][predicted.item()]])  # add the maximum prediction and the corrected class
+        
+        # find the most confident prediction
+        max = None
+        for max_pred in max_preds:
+            if max == None:
+                max = max_pred
+            else:
+                if max_pred[0] > max[0]:
+                    max = max_pred
+
+        return max[1] # return the predicted class
+
+    def validate(self, dir_path):
+        correct = 0
+        total = 0
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+        # loop through every letter/class in alphabet
+        for class_num, letter in enumerate(alphabet):
+            # set the class directory path
+            class_dir_pth = dir_path + "/" + letter
+
+            # get all the jpg files in the class directory
+            files = os.listdir(class_dir_pth)
+            jpg_files = [file for file in files if file.lower().endswith('.jpg')]
+
+            for file in jpg_files:
+                image = JPGtoTensor(class_dir_pth + "/" + file,device=self.device)
+                predicted = self.classify(image)
+                total += 1
+                if predicted == class_num:
+                    correct += 1
+                else:
+                    alphabet = string.ascii_uppercase
+                    print("Predicted: " + alphabet[predicted] + "\tActual: " + alphabet[class_num])
+
+        accuracy = 100 * correct / total
+
+        return accuracy
+
+    # save all models to standard file location
+    def save(self):
+        for i in range(self.num_models):
+            save_model(self.models[i],"models/model_" + str(i) + ".pth")
+    
+    # load previously saved models
+    def load(self,num_models, device,input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28,28*28], activation=F.relu, dropout_rate = 0):
+        self.num_models = num_models
+        self.models = []
+        for i in range(self.num_models):
+            self.models.append(LetterClassifier(input_size=input_size, num_layers=num_layers, layer_sizes=layer_sizes, output_size=self.output_sizes[i], activation=activation, dropout_rate = dropout_rate))
+            self.models[i].load_state_dict(torch.load("models/model_" + str(i) + ".pth"))
+            self.models[i].to(device)
+
+
 #### MAIN ####
 if __name__ == "__main__":
+    try:
+        # set constant training values
+        no_epochs = 30
+        min_loss_chng = 0.02
+        learn_rate = 0.01
+        batch_size = 32
+        num_models = 1
 
-    # set constant training values
-    no_epochs = 6
-    min_loss_chng = 0.02
-    learn_rate = 0.01
-    batch_size = 32
+        # target model list
+        alphabet = string.ascii_uppercase
+        # letters_list = [['D', 'O', 'G', 'Q', 'U', 'V', 'W', 'Y', 'Z', 'M', 'N', 'F', 'T'],
+        #         ['E', 'I', 'H', 'L', 'K', 'A', 'R', 'X', 'C', 'J', 'P', 'B', 'S']]
+        # letters_list = [['B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'P', 'R', 'S'], ['A', 'I', 'M', 'N', 'O', 'Q', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']]
+        # letters_list = [['M', 'N', 'W', 'H', 'V', 'U', 'R', 'P', 'Y'],
+        #                 ['O', 'C', 'D', 'Q', 'G', 'B', 'A', 'K'],
+        #                 ['E', 'F', 'X', 'T', 'I', 'L', 'J', 'S', 'Z']]
+        letters_list = []
+        positions_list = [[alphabet.index(letter) for letter in sublist] for sublist in letters_list]
 
-    # get the device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # get the device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # load the dataset
-    print("Loading Dataset.")
-    x_train, y_train, x_valid, y_valid,  x_test, y_test = getKaggleData('data/kaggle/a_to_j.csv')
-    train_dataset,val_dataset,test_dataset = makeDatasets(x_train,y_train,x_valid, y_valid, x_test,y_test)
+        # initialise model
+        comb_classifier = CombLetterClassifier(num_models,device,create_models=False,model_targets=positions_list)
 
-    train_dataset = [(x.to(device), y.to(device)) for x, y in train_dataset]
-    val_dataset = [(x.to(device), y.to(device)) for x, y in val_dataset]
-    test_dataset = [(x.to(device), y.to(device)) for x, y in test_dataset]
-
-    train_loader, val_loader, test_loader = make_DataLoaders(train_dataset,val_dataset,test_dataset,batch_size)
-    print("Data Loaded Successfully.")
-
-    # load last model if exists and user requests it
-    loaded = False
-    if os.path.exists('current_model.pth'):
+        # load last model if exists and user requests it
+        loaded = False
         load_new = input("Would you like to load the previous model (y/n):")
         if load_new == "y":
             # File path exists, proceed with loading the model
-            classifier = LetterClassifier(input_size= 28*28, num_layers=3,layer_sizes=[28*28,28*28,28*28],output_size=13)
-            classifier.load_state_dict(torch.load('current_model.pth'))
-            classifier.to(device)
+            comb_classifier.load(num_models,device)
             print("Model loaded successfully.")
             loaded = True
-        
-    # train the model if not loaded
-    if loaded == False:
-        print("Beginning training.")
-        print("Training using:", device)
-        classifier = LetterClassifier(input_size= 28*28, num_layers=3,layer_sizes=[28*28,28*28,28*28],output_size=13)
-        classifier.to(device)
-        validation_trend, training_trend, loss_trend, epochs = train_classifier(classifier,train_loader,val_loader,no_epochs,min_loss_chng,learn_rate, display = True)
+            
+        # train the model if not loaded
+        if loaded == False:
 
-    # show the models test accuracy
-    val_acc = validate_classifier(classifier, test_loader)
-    print(f"Test Set Validation Accuracy: {val_acc:.2f}%")
+            comb_classifier = CombLetterClassifier(num_models,device,model_targets=positions_list)
 
-    # ask if teh user would like to save the current model
-    save = input("Would you like to overwrite the last model (y/n):")
-    if save == "y":
-        save_model(classifier,'current_model.pth')
-        print("Model saved successfully.")
+            print("Loading Data.")
+            comb_classifier.createDataLoaders("data/kaggle/kaggle_letters.csv",batch_size)
+            print("Data Loaded.")
 
-    # get file path of digit to predict
-    file_path = input("Please enter a filepath (\"q\" to quit): ")
-    while file_path != "q":
-        image = JPGtoTensor(file_path,device)
-        prediction = makePrediction(classifier,image)
-        print("Classifier: %d" % prediction)
+            print("Training Models.")
+            comb_classifier.train(no_epochs,min_loss_chng,learn_rate,display=True)
+
+            # ask if teh user would like to save the current model
+            save = input("Would you like to overwrite the last model (y/n):")
+            if save == "y":
+                comb_classifier.save()
+                print("Model saved successfully.")
+
+        # test final model on handcrafted test data
+        accuracy = comb_classifier.validate("data/hand_crafted")
+        print("Combined Model Test Accuracy: {:.4f}".format(accuracy))
+
+        # get file path of digit to predict
         file_path = input("Please enter a filepath (\"q\" to quit): ")
+        while file_path != "q":
+            if file_path != "":
+                image = JPGtoTensor(file_path,device)
+                pred_class = comb_classifier.classify(image)
+                print("Im pretty sure its",alphabet[pred_class])
+            file_path = input("Please enter a filepath (\"q\" to quit): ")
+
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt detected. Exiting...")
+        torch.cuda.empty_cache()
+        print("GPU memory released.")
+        sys.exit(1)
