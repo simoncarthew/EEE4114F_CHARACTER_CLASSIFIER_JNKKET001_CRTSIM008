@@ -2,8 +2,6 @@
 import torch
 import pandas as pd
 from sklearn.model_selection import train_test_split
-import sklearn.metrics
-import seaborn as sns
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets
@@ -20,48 +18,30 @@ import sys
 #### MISC FUNCTIONS #####
 
 # load MNIST training and test data
-def getProcessedData():
-    # get the data from the mnsit data
-    train = datasets.MNIST(".", train=True, download=False)
-    test = datasets.MNIST(".", train=False, download=False)
+def getKaggleData(file_path, test_size=0.2, test = True):
+    # Read the data from the file path
+    data = pd.read_csv(file_path)
 
-    # extract the image data into x and labels into y
-    x_train = train.data.float()
-    y_train = train.targets
-    x_test = test.data.float()
-    y_test = test.targets
+    # Extract the image data into X and labels into y
+    y = data['0']
+    X = data.drop('0', axis=1)
+    X = X.astype(float)
 
-    # convert the training and test data into numpy array
-    x_train = x_train.numpy()
-    y_train = y_train.numpy()
-    x_test = x_test.numpy()
-    y_test = y_test.numpy()
+    # Split into training and testing data
+    X_train, X_test, y_train, y_test = train_test_split(X.values, y.values, test_size=test_size, random_state=42)
 
-    # normalize the pixel values to be between 0 and 1
-    # x_train = x_train / 255.0
-    # x_test = x_test / 255.0
+    # Create validation data
+    if test:
+        X_train, X_valid, y_train, y_valid = train_test_split(X_train, y_train, test_size=test_size, random_state=42)
+    else:
+        X_valid, y_valid = None, None
 
-    # # create validation data
-    # test_size = x_test.shape[0]
-    # indices = np.random.choice(x_train.shape[0], test_size, replace=False)
+    # Reshape the image data into 2D arrays
+    X_train = X_train.reshape(-1, 28 * 28)
+    X_valid = X_valid.reshape(-1, 28 * 28) if X_valid is not None else None
+    X_test = X_test.reshape(-1, 28 * 28)
 
-    # x_valid = x_train[indices]
-    # y_valid = y_train[indices]
-
-    # # remove validation set from training set
-    # x_train = np.delete(x_train, indices, axis=0)
-    # y_train = np.delete(y_train, indices, axis=0)
-
-    # this is just cause we wont be using the mnist for testing only validation
-    x_valid = x_test
-    y_valid = y_test
-
-    # flatten the image data into 1D arrays
-    x_train = x_train.reshape(-1, 28*28)
-    x_valid = x_valid.reshape(-1,28*28)
-    x_test = x_test.reshape(-1, 28*28)
-
-    return x_train, y_train, x_valid, y_valid,  x_test, y_test
+    return X_train, y_train, X_valid, y_valid, X_test, y_test
 
 def makeDatasets(x_train, y_train, x_valid, y_valid,  x_test, y_test):
     train_dataset = TensorDataset(torch.from_numpy(x_train), torch.from_numpy(y_train))
@@ -75,28 +55,14 @@ def make_DataLoaders(train_dataset, val_dataset, test_dataset, batch_size):
     test_loader = DataLoader(test_dataset, batch_size, shuffle=True)
     return train_loader, val_loader, test_loader
 
-def JPGtoTensor(file_path, device):
-    # Read the image from file
+# read JPEG from path and convert to flatted tensor
+def JPGtoTensor(file_path,device):
     image = io.read_image(file_path)
-    
-    # Convert image to grayscale if it's not already
-    if image.shape[0] == 3:
-        image = transforms.functional.rgb_to_grayscale(image)
-    
-    # Resize image to 28x28 if it's not already
-    image = transforms.functional.resize(image, [28, 28])
-
-    # Normalize the pixel values to be between 0 and 1
-    # image = image.float() / 255.0
-    
-    # Flatten the image to a 1D tensor
-    image = image.view(-1).float()
-    
-    # Send the image tensor to the specified device
+    image = image.float()
+    image_np = image.numpy()
+    image = torch.tensor(image_np).view(1, -1)
     image = image.to(device)
-    
     return image
-
 
 def display_image(X_i, title):
     plt.imshow(X_i, cmap='binary')
@@ -105,9 +71,9 @@ def display_image(X_i, title):
 
 #### ANN MODEL ####
 
-class NumberClassifier(nn.Module):
-    def __init__(self, input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28,28*28,28*28,28*28,28*28,28*28,28*28,28*28,28*28], output_size=10, activation=F.relu, dropout_rate = 0):
-        super(NumberClassifier, self).__init__()
+class LetterClassifier(nn.Module):
+    def __init__(self, input_size=28*28, num_layers=3, layer_sizes=[28*28,28*28], output_size=10, activation=F.relu, dropout_rate = 0):
+        super(LetterClassifier, self).__init__()
         
         self.layers = nn.ModuleList()
         
@@ -198,30 +164,21 @@ def validate_classifier(model, test_loader, max_batches = None):
 
     return accuracy
 
-def validate_jpgs(model, device, dir_path):
-    correct = 0
-    total = 0
-    numbers = [0,1,2,3,4,5,6,7,8,9]
+def makePrediction(model,image):
+    output = model(torch.tensor(image).view(1, -1))
+    _, predicted = torch.max(output, 1)
+    return predicted
 
-    # loop through every letter/class in alphabet
-    for class_num in numbers:
-        # set the class directory path
-        class_dir_pth = dir_path + "/" + str(class_num)
-
-        # get all the jpg files in the class directory
-        files = os.listdir(class_dir_pth)
-        jpg_files = [file for file in files if file.lower().endswith('.jpg')]
-
-        for file in jpg_files:
-            image = JPGtoTensor(class_dir_pth + "/" + file,device=device)
-            output = model(image.clone().detach().reshape(1, -1))
-            _, predicted = torch.max(output, 1)
-            total += 1
-            if predicted == class_num:
-                correct += 1
-
-    accuracy = 100 * correct / total
-    return accuracy
+def examplePredictions(model,no_examples):
+    model.eval()
+    with torch.no_grad():
+        for i in range(no_examples):
+            idx = random.randint(0, x_test.shape[0])
+            image = x_test[idx]
+            label = y_test[idx]
+            predicted = makePrediction(model,image)
+            print("True label: %d, Predicted label: %d" % (label, predicted))
+            display_image(image.reshape(28, 28), "True label: %d, Predicted label: %d" % (label, predicted))
 
 # save the current state of a model
 def save_model(model,file_path):
@@ -229,6 +186,68 @@ def save_model(model,file_path):
 
 # load a previously trained model
 def load_model(file_path):
-    model = NumberClassifier()
+    model = LetterClassifier()
     model.load_state_dict(torch.load(file_path))
     return model
+
+#### MAIN ####
+if __name__ == "__main__":
+
+    # set constant training values
+    no_epochs = 6
+    min_loss_chng = 0.02
+    learn_rate = 0.01
+    batch_size = 32
+
+    # get the device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # load the dataset
+    print("Loading Dataset.")
+    x_train, y_train, x_valid, y_valid,  x_test, y_test = getKaggleData('data/kaggle/a_to_j.csv')
+    train_dataset,val_dataset,test_dataset = makeDatasets(x_train,y_train,x_valid, y_valid, x_test,y_test)
+
+    train_dataset = [(x.to(device), y.to(device)) for x, y in train_dataset]
+    val_dataset = [(x.to(device), y.to(device)) for x, y in val_dataset]
+    test_dataset = [(x.to(device), y.to(device)) for x, y in test_dataset]
+
+    train_loader, val_loader, test_loader = make_DataLoaders(train_dataset,val_dataset,test_dataset,batch_size)
+    print("Data Loaded Successfully.")
+
+    # load last model if exists and user requests it
+    loaded = False
+    if os.path.exists('current_model.pth'):
+        load_new = input("Would you like to load the previous model (y/n):")
+        if load_new == "y":
+            # File path exists, proceed with loading the model
+            classifier = LetterClassifier(input_size= 28*28, num_layers=3,layer_sizes=[28*28,28*28,28*28],output_size=13)
+            classifier.load_state_dict(torch.load('current_model.pth'))
+            classifier.to(device)
+            print("Model loaded successfully.")
+            loaded = True
+        
+    # train the model if not loaded
+    if loaded == False:
+        print("Beginning training.")
+        print("Training using:", device)
+        classifier = LetterClassifier(input_size= 28*28, num_layers=3,layer_sizes=[28*28,28*28,28*28],output_size=13)
+        classifier.to(device)
+        validation_trend, training_trend, loss_trend, epochs = train_classifier(classifier,train_loader,val_loader,no_epochs,min_loss_chng,learn_rate, display = True)
+
+    # show the models test accuracy
+    val_acc = validate_classifier(classifier, test_loader)
+    print(f"Test Set Validation Accuracy: {val_acc:.2f}%")
+
+    # ask if teh user would like to save the current model
+    save = input("Would you like to overwrite the last model (y/n):")
+    if save == "y":
+        save_model(classifier,'current_model.pth')
+        print("Model saved successfully.")
+
+    # get file path of digit to predict
+    file_path = input("Please enter a filepath (\"q\" to quit): ")
+    while file_path != "q":
+        image = JPGtoTensor(file_path,device)
+        prediction = makePrediction(classifier,image)
+        print("Classifier: %d" % prediction)
+        file_path = input("Please enter a filepath (\"q\" to quit): ")
